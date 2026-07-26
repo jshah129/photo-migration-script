@@ -1,0 +1,8 @@
+# Run artifacts. These contain the full paths, filenames and hashes of a real photo
+# library, so they are personal data -- never commit them.
+reports/
+*.csv
+
+# Windows cruft
+Thumbs.db
+desktop.ini
