@@ -4,9 +4,11 @@
   byte-level deduplication cannot detect.
 
 .DESCRIPTION
-  When an iPhone import converts HEIC to JPEG, you end up with two files that are
-  the same photograph but share not a single byte. SHA-256 correctly refuses to call
-  them duplicates, so Migrate-Photos.ps1 keeps both. This script finds them.
+  Windows converts HEIC to JPEG when importing from an iPhone with the default
+  "Automatic" setting. Import once that way and once as originals -- or import on
+  two different PCs -- and you end up holding both renditions of the same photo.
+  They share no bytes, so SHA-256 correctly refuses to call them duplicates and
+  Migrate-Photos.ps1 keeps both. This script finds them.
 
   A pair is reported only when ALL of these hold:
 
@@ -15,40 +17,33 @@
     * both files are stills              -- HEIC + MOV is a Live Photo, not a duplicate
     * the formats differ                 -- otherwise it is a byte-dedup matter
 
-  Matching on the stem alone is unsafe because iPhones recycle IMG_#### numbers, and
-  matching on capture time alone is far too loose: Windows exposes "Date taken" only
-  to the minute, so a burst of shots shares one timestamp. Together they are precise.
+  Stem alone is unsafe because iPhones recycle IMG_#### numbers. Capture time alone
+  is far too loose: Windows exposes "Date taken" only to the minute, so a burst of
+  shots shares one timestamp. Together they are precise.
 
   Apple's edited renditions (IMG_E7533) are tracked as a separate stem from the
-  original (IMG_7533), because an edit is a genuinely different image.
+  original, because an edit is a genuinely different image.
 
   Nothing is moved or deleted. Choosing a format is a judgement call:
 
     HEIC  - the original, about half the size, better quality, poor compatibility
     JPEG  - converted, larger, slightly lossy, opens anywhere
 
-.PARAMETER HistoryPlanPath
-  Files already migrated no longer carry their camera filename -- the current plan
-  only knows them as 20231008-001.jpg. Point this at the plan.csv from the run that
-  originally renamed them to recover the mapping. Without it, only pairs among newly
-  arriving files can be found.
+.PARAMETER IndexPath
+  reports\library-index.csv, which Migrate-Photos.ps1 maintains automatically.
+  Files already migrated no longer carry their camera filename, and this is where
+  it is remembered. Defaults to the index beside the plan. Absent, only pairs among
+  newly arriving files can be found -- which is all that exists on a first run.
 
 .EXAMPLE
-  .\Find-NearDuplicates.ps1 -PlanPath .\reports\run-B\plan.csv `
-                            -HistoryPlanPath .\reports\run-A\plan.csv
+  .\Find-NearDuplicates.ps1 -PlanPath .\reports\run-20260726-174255\plan.csv
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string] $PlanPath,
 
-    # Accepts several plans. Each incremental import adds a generation of settled
-    # files, so pass every prior run's plan to resolve all of them.
-    [string[]] $HistoryPlanPath,
-
-    # If files were renamed after a history plan was written, supply the rename log
-    # (a CSV with Old and New columns) so the chain current -> old -> camera resolves.
-    [string[]] $RenameMapPath,
+    [string] $IndexPath,
 
     # Where to write the report. Defaults to the plan's own folder.
     [string] $OutputPath
@@ -63,35 +58,23 @@ if (-not (Test-Path -LiteralPath $PlanPath)) { throw "Plan not found: $PlanPath"
 $rows = @(Import-Csv -LiteralPath $PlanPath)
 if ($rows.Count -eq 0) { throw "Plan is empty: $PlanPath" }
 
+$runDir = Split-Path -Parent $PlanPath
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path (Split-Path -Parent $PlanPath) 'possible-duplicates.csv'
+    $OutputPath = Join-Path $runDir 'possible-duplicates.csv'
+}
+if ([string]::IsNullOrWhiteSpace($IndexPath)) {
+    $IndexPath = Join-Path (Split-Path -Parent $runDir) 'library-index.csv'
 }
 
-# Current name -> the name it had when the history plan was written.
-$rename = @{}
-foreach ($path in @($RenameMapPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-    if (-not (Test-Path -LiteralPath $path)) { throw "Rename map not found: $path" }
-    foreach ($m in (Import-Csv -LiteralPath $path)) {
-        if (-not $rename.ContainsKey($m.New)) { $rename[$m.New] = $m.Old }
+# Camera filename for every file already migrated, however many runs ago.
+$index = @{}
+if (Test-Path -LiteralPath $IndexPath) {
+    foreach ($row in (Import-Csv -LiteralPath $IndexPath)) {
+        $index[$row.Name] = $row.CameraName
     }
-}
-if ($rename.Count -gt 0) {
-    Write-Host "  Loaded $($rename.Count) rename mappings." -ForegroundColor DarkGray
-}
-
-# Recover camera filenames for files migrated by earlier runs. Later plans are
-# merged first so the most recent generation wins any name reused across runs.
-$history = @{}
-foreach ($path in @($HistoryPlanPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-    if (-not (Test-Path -LiteralPath $path)) { throw "History plan not found: $path" }
-    foreach ($h in (Import-Csv -LiteralPath $path)) {
-        if ($h.Action -eq 'Keep' -and -not $history.ContainsKey($h.NewName)) {
-            $history[$h.NewName] = $h.OriginalName
-        }
-    }
-}
-if ($history.Count -gt 0) {
-    Write-Host "  Recovered $($history.Count) camera filenames from $(@($HistoryPlanPath).Count) history plan(s)." -ForegroundColor DarkGray
+    Write-Host "  Index: $($index.Count) known camera filenames." -ForegroundColor DarkGray
+} else {
+    Write-Host "  No library index yet -- only newly arriving files can be paired." -ForegroundColor DarkGray
 }
 
 <#
@@ -109,12 +92,10 @@ function Get-CameraStem {
 
 $groups = @{}
 foreach ($row in $rows) {
-    # Resolve the camera filename: settled rows need the history map.
+    # Settled rows carry their library name; the index remembers what it arrived as.
     $cameraName = $row.OriginalName
-    if ($row.Action -eq 'Skip') {
-        $historic = $row.OriginalName
-        if ($rename.ContainsKey($historic)) { $historic = $rename[$historic] }
-        if ($history.ContainsKey($historic)) { $cameraName = $history[$historic] }
+    if ($row.Action -eq 'Skip' -and $index.ContainsKey($row.OriginalName)) {
+        $cameraName = $index[$row.OriginalName]
     }
 
     $stem = Get-CameraStem $cameraName
@@ -172,32 +153,34 @@ Write-Host ''
 Write-Host '=== Same photo, different format ===' -ForegroundColor Cyan
 Write-Host "  Matched groups : $pairCount"
 Write-Host "  Files involved : $($sorted.Count)"
-Write-Host ''
-foreach ($g in ($sorted | Group-Object Relationship | Sort-Object Count -Descending)) {
-    $label = switch ($g.Name) {
-        'NewVsExisting'  { 'arriving file matches one already in the library' }
-        'WithinImport'   { 'two arriving files match each other' }
-        'WithinExisting' { 'two library files match each other' }
-        default          { $g.Name }
+
+if ($sorted.Count -gt 0) {
+    Write-Host ''
+    foreach ($g in ($sorted | Group-Object Relationship | Sort-Object Count -Descending)) {
+        $label = switch ($g.Name) {
+            'NewVsExisting'  { 'arriving file matches one already in the library' }
+            'WithinImport'   { 'two arriving files match each other' }
+            'WithinExisting' { 'two library files match each other' }
+            default          { $g.Name }
+        }
+        Write-Host ("    {0,-16} {1,5} files  {2}" -f $g.Name, $g.Count, $label)
     }
-    Write-Host ("    {0,-16} {1,5} files  {2}" -f $g.Name, $g.Count, $label)
+
+    Write-Host ''
+    Write-Host '  Formats:'
+    foreach ($f in ($sorted | Group-Object Format | Sort-Object Count -Descending)) {
+        Write-Host ("    {0,-6} {1,5}" -f $f.Name, $f.Count)
+    }
+
+    $reclaim = 0
+    foreach ($g in ($sorted | Group-Object { $_.CameraStem + $_.CapturedAt })) {
+        $sizes = @($g.Group | ForEach-Object { [double] $_.SizeMB } | Sort-Object -Descending)
+        if ($sizes.Count -gt 1) { $reclaim += ($sizes | Select-Object -Skip 1 | Measure-Object -Sum).Sum }
+    }
+    Write-Host ''
+    Write-Host ("  Keeping one copy per group would free {0} GB" -f [math]::Round($reclaim / 1024, 2))
 }
 
-Write-Host ''
-Write-Host '  Formats:'
-foreach ($f in ($sorted | Group-Object Format | Sort-Object Count -Descending)) {
-    Write-Host ("    {0,-6} {1,5}" -f $f.Name, $f.Count)
-}
-
-# Space freed by keeping the largest copy in each group is a poor proxy; report the
-# smaller-copy total instead, which is what dropping the redundant rendition saves.
-$reclaim = 0
-foreach ($g in ($sorted | Group-Object { $_.CameraStem + $_.CapturedAt })) {
-    $sizes = @($g.Group | ForEach-Object { [double] $_.SizeMB } | Sort-Object -Descending)
-    if ($sizes.Count -gt 1) { $reclaim += ($sizes | Select-Object -Skip 1 | Measure-Object -Sum).Sum }
-}
-Write-Host ''
-Write-Host ("  Keeping one copy per group would free {0} GB" -f [math]::Round($reclaim / 1024, 2))
 Write-Host ''
 Write-Host "  Report: $OutputPath"
 Write-Host '  Nothing was moved or deleted.' -ForegroundColor DarkGray

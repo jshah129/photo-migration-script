@@ -1,158 +1,149 @@
-# Photo Migration Script
+# iPhone Photo Backup for Windows
 
-Flattens a messy photo library into one folder, renames every file by the date it was
-actually taken (`YYYYMMDD-NNN`), and quarantines byte-identical duplicates.
+Back your iPhone photos up to a Windows PC and end up with a library you can
+actually navigate: one folder, every file named for the date it was taken, and no
+duplicates.
 
-PowerShell, no dependencies, Windows only. Built and hardened against a real ~12,000
-file / 74 GB library that had accumulated across a decade of phone exports, camera
-dumps and re-copies.
+```
+IMG_7533.HEIC   ->   20231008-001.heic
+IMG_7534.HEIC   ->   20231008-002.heic
+IMG_7534.MOV    ->   20231008-002.mov     (Live Photo, kept paired)
+```
 
-**Nothing is ever deleted.** Duplicates are moved to a quarantine folder for you to
-review. Every run is reversible.
+Sort by filename and you are sorting by time. Plug the phone in again next month and
+run it again; it only touches the new arrivals.
 
-## Quick start
+PowerShell 5.1+, no dependencies, no cloud, no account. **Nothing is ever deleted** —
+duplicates move to a quarantine folder for you to review — and every run is
+reversible.
+
+## Why this is needed
+
+Copying photos off an iPhone gives you folders like `100APPLE` full of `IMG_0001.HEIC`,
+and the problems start immediately:
+
+- **Filenames are meaningless and collide.** iPhones recycle `IMG_0001` endlessly, so
+  the same name covers unrelated photos across folders and across imports.
+- **File timestamps are wrong.** Copying sets them to the copy date, not the day you
+  took the photo. Sorting by "date modified" sorts by when you plugged the cable in.
+- **You import the same photos repeatedly.** Every import overlaps the last, and
+  Windows will happily keep `IMG_0001 (2).HEIC` forever.
+- **Windows silently converts HEIC to JPEG** on import unless you change a setting, so
+  the same photo ends up stored twice in two formats that share no bytes.
+
+This handles all four.
+
+## Getting started
+
+Copy photos off your iPhone however you like — Windows' *Import pictures and videos*,
+dragging `DCIM` folders out of File Explorer, or an existing pile you already have.
+Drop them anywhere inside your Pictures folder. The layout does not matter; nested
+subfolders are fine.
 
 ```powershell
-# 1. Scan. Read-only -- writes reports, changes nothing.
-.\Migrate-Photos.ps1 -Root "C:\path\to\Pictures"
+# 1. Look, don't touch. Read-only: writes a plan, changes nothing.
+.\Migrate-Photos.ps1
 
-# 2. Review reports\run-<timestamp>\ (see "What to review" below)
+# 2. Read reports\run-<timestamp>\plan.csv -- every rename it intends to do.
 
-# 3. Apply the plan you just reviewed.
+# 3. Do it.
 .\Migrate-Photos.ps1 -Execute -PlanPath ".\reports\run-<timestamp>\plan.csv"
 
-# 4. If anything looks wrong, reverse it completely.
+# 4. Changed your mind? Put everything back exactly as it was.
 .\Undo-Migration.ps1 -ManifestPath ".\reports\run-<timestamp>\manifest.csv"
 ```
 
-Nothing is destructive until step 3, and step 3 is fully reversible by step 4.
+Point it elsewhere with `-Root "D:\Photos"`. Nothing is modified until step 3, and
+step 3 is fully reversible by step 4.
 
-## The problem this solves
+**Every import after the first:** add `-Incremental` so files already sorted are left
+alone. See [Adding more photos later](#adding-more-photos-later).
 
-Photo libraries rot in a specific way. Files get copied between drives, exported from
-phones, re-organised into trip folders, and backed up again. After a few rounds:
+## How dates are worked out
 
-- **Filesystem timestamps are worthless.** Every file reports the date of the last
-  bulk copy, not the date of the photo.
-- **Filenames collide.** Phones recycle `IMG_0001.jpg` endlessly, so the same name
-  covers dozens of unrelated photos across folders.
-- **The same photo exists many times** under different names, in different folders,
-  sometimes in different formats.
-
-Sorting by name or date in Explorer gives you nonsense. This script rebuilds the
-library from what the files actually contain.
-
-## How dates are resolved
-
-Timestamps are the *last* thing to trust. The script reads real capture metadata
-first and falls back only when it must:
+File timestamps are the *last* thing to trust, so real capture metadata is read first:
 
 | Priority | Source | Notes |
 |---|---|---|
-| 1 | EXIF `Date taken` (shell property 12) | Photos. Trusted outright |
-| 2 | `Media created` (shell property 214) | Videos. Accepted only if it agrees with the folder's month |
-| 3 | Date embedded in filename | e.g. `PXL_20240229_...`, `2024-02-29...` |
-| 4 | `LastWriteTime`, if it agrees with the folder's month | Has a real day-of-month, so preferred when plausible |
-| 5 | Month encoded in the folder name | Leading `YYYYMM` only (`202310_a` → Oct 2023). Day defaults to the 1st |
-| 6 | `LastWriteTime`, when no folder date exists | Rough, but usually the right era |
+| 1 | EXIF `Date taken` | Photos. Trusted outright |
+| 2 | `Media created` | Videos. Accepted only if it agrees with the folder's month |
+| 3 | Date embedded in the filename | Screenshots, WhatsApp saves, `PXL_20240229_...` |
+| 4 | `LastWriteTime`, if it agrees with the folder's month | Carries a real day-of-month |
+| 5 | Month from a `YYYYMM` folder name | Day defaults to the 1st |
+| 6 | `LastWriteTime` | Rough, but usually the right era |
 | 7 | `CreationTime` | Last resort. Flagged as low-confidence |
-| — | `Unreliable` | Every source failed. Flagged for manual review |
+| — | `Unreliable` | Everything failed. Flagged for manual review |
 
-Every row in `plan.csv` records which source won in its `DateSource` column, so you
-can sort by it and check the weak ones before executing.
+Every row in `plan.csv` records which source won, in its `DateSource` column. Sort by
+it and spot-check anything below priority 3 before you execute.
 
-### Four traps this handles
+Three details worth knowing, because each one silently misdates files if handled
+naively:
 
-These were all found by running against real data, and each would have silently
-misdated hundreds of files.
+**Zeroed metadata reads as 1969.** Some videos carry an empty `Media created` that
+parses to the Unix epoch. Left alone they all pile up under `19691231-NNN`. Every
+source is floored at 1990; below that the value is discarded and the next one tried.
 
-**Zeroed metadata parses to the Unix epoch.** Some MOV files carry an empty
-`Media created` that reads as `1969-12-31` in a western timezone. Without a floor,
-they all get named `19691231-NNN`. Every source is floored at 1990-01-01; below that
-the value is discarded and the next source tried.
-
-**Bulk-copy dates masquerade as capture dates.** Hundreds of files landed on a single
-date — the day the library was copied, not shot. Folders named `202206__` encode the
-true month, so when a timestamp falls *outside* the month its folder claims, the
-folder wins; when it falls *inside*, the timestamp is kept because it carries a real
-day-of-month.
-
-**Video metadata lies; EXIF does not.** Re-encoded videos share a single
-`Media created` stamp — the export time, not the capture time. Measuring the whole
-library settled which sources deserve trust: of 3,761 files in month-encoded folders,
-239 disagreed with their folder and *every one was `Media created`*. EXIF `Date taken`
-never disagreed once. So the folder cross-check is applied to `Media created` and
-deliberately withheld from EXIF.
+**Video timestamps lie more than photo timestamps.** Re-encoded or exported videos
+often share one `Media created` value recording when they were exported, not shot.
+Where a folder names its month, `Media created` is checked against it and rejected if
+it disagrees. EXIF `Date taken` gets no such treatment — measured across a full
+library, it never disagreed with a folder once, while `Media created` accounted for
+every disagreement found.
 
 **Only a leading `YYYYMM` counts as a folder date.** Digits elsewhere in a folder name
-are ignored on purpose: `Project 1204` is not December 4th and `Invoice 0315` is not
-March 15th, and guessing otherwise misdates files silently. The search walks up to
-three parent levels, since curated subfolders (`202310_a\Selected Media`) name no date
-of their own, and stops at the library root so folders outside it are never consulted.
+are ignored on purpose: `Project 1204` is not December 4th. The search walks up to
+three parent levels, since a subfolder like `Selected` carries no date of its own, and
+stops at the library root.
 
-### Not everything odd is an artifact
+> EXIF times are camera-local; Google's `PXL_` filenames are UTC. A photo taken at 7pm
+> on 2/28 local becomes `PXL_20240229_...`. EXIF wins, which is correct — the file is
+> named for the day you actually took it.
 
-A folder where 316 photos all share one date looks exactly like a bulk-copy
-signature. But if their times span 06:11–23:59 with a spike at 23:00, and the folder
-also holds the following two days, that is a real New Year's trip. The distinction is
-time-of-day spread: artifacts collapse into a handful of identical stamps, real days
-do not. The script leaves these alone.
-
-> EXIF times are camera-local; Google's `PXL_` filenames are UTC. A photo taken at
-> 7pm on 2/28 local becomes `PXL_20240229_...`. EXIF wins, which is correct — the
-> file is named for the day you actually took it.
+A day where every photo shares one timestamp usually means a bulk-copy artifact, but
+not always: if the times span the whole day and neighbouring days are present, it is a
+real day and is left alone.
 
 ## How duplicates are handled
 
-Dedup is **content-based (SHA-256), never name-based.** This matters in both
+Deduplication is **content-based (SHA-256), never name-based** — which matters in both
 directions:
 
-- **Same bytes, different names** → genuine duplicates. One copy is kept, the rest
-  move to quarantine. Two files are the same photo regardless of what they're called.
-- **Same name, different bytes** → *not* duplicates. A typical library has hundreds of
-  repeated filenames. Name-matching would silently destroy distinct photos.
-  **Every distinct image survives**, and the date-based rename gives each a unique
-  name. They're listed in `same-name-different-photo.csv`.
+- **Same bytes, different names** → genuine duplicates. One copy is kept; the rest move
+  to quarantine.
+- **Same name, different bytes** → *not* duplicates. Because iPhones recycle `IMG_0001`,
+  name-matching would silently destroy unrelated photos. **Every distinct image
+  survives.** They are listed in `same-name-different-photo.csv`.
 
-This is a guarantee about *images*, not *files*. One name can cover three files that
-are only two distinct photos — two byte-identical, one different. The redundant copy
-is still quarantined; both real photos survive:
+That guarantee is about *images*, not *files*. One name can cover three files that are
+only two distinct photos — two byte-identical, one different. The redundant copy is
+still quarantined; both real photos survive:
 
-| Path | Image | Action |
+| File | Image | Action |
 |---|---|---|
-| `Camera Roll\IMG_0213.JPG` | `A13988E3…` | Keep |
-| `Phone\201711__\IMG_0213.JPG` | `A13988E3…` | Quarantine |
-| `Phone\202204__\IMG_0213.JPG` | `0BBB0934…` | Keep |
+| `100APPLE\IMG_0213.JPG` | `A13988E3…` | Keep |
+| `101APPLE\IMG_0213.JPG` | `A13988E3…` | Quarantine |
+| `102APPLE\IMG_0213.JPG` | `0BBB0934…` | Keep |
 
-Verified as an invariant across every shared name in the test library: files kept
-always equals distinct images, zero violations. Nothing visually unique is ever
-quarantined.
+Files kept always equals distinct images. Nothing visually unique is ever quarantined.
 
-When choosing which copy of a duplicate set to keep, the script prefers the one with
-the most trustworthy date source, then the shallowest path, then alphabetical order —
-so results are identical across runs.
+Where several copies are identical, the one with the most trustworthy date wins, then
+the shallowest path, then alphabetical order — so runs are repeatable.
 
-**Sidecars are exempt from dedup.** Apple writes byte-identical `.AAE` edit sidecars
-for unrelated photos; hashing them would delete legitimate edit data. They're matched
-to their photo by name instead.
+**`.AAE` sidecars are exempt from deduplication.** Apple writes byte-identical edit
+sidecars for unrelated photos, so hashing them would throw away real edit data. They
+are matched to their photo by name instead.
 
 ## Naming
 
-`YYYYMMDD-NNN.ext` — e.g. `20250804-001.jpg`, `20250804-002.jpg`.
+`YYYYMMDD-NNN.ext` — `20250804-001.jpg`, `20250804-002.jpg`.
 
-Year-first so a plain filename sort is chronological, and zero-padded to three digits
-so `-002` does not sort after `-010`. Both matter: without padding, any day holding
-ten or more files orders wrongly within itself.
+Year-first so a filename sort is chronological, and zero-padded to three digits so
+`-002` does not sort after `-010`. `NNN` restarts each day and follows the order the
+shots were actually taken.
 
-`NNN` restarts each calendar day and runs in **chronological order within that day**,
-so `-001`, `-002`, `-003` is the order the shots were actually taken.
-
-**A trailing label is preserved.** Rename a file to `20231221-001-BeachTrip.mp4` and
-later runs leave it alone, so you can annotate favourites without breaking anything.
-
-**Live Photo and sidecar sets stay together.** Files sharing a folder and base name
-(`IMG_1234.HEIC` + `IMG_1234.MOV` + `IMG_1234.AAE`) get the *same* number with their
-own extensions:
+**Live Photos stay paired.** The HEIC and its MOV share a base name, so they get the
+same number and stay together:
 
 ```
 20250804-007.heic
@@ -160,135 +151,123 @@ own extensions:
 20250804-007.aae
 ```
 
-Pass `-NoPairGrouping` to give every file its own number instead.
+Use `-NoPairGrouping` to number every file separately.
 
-## Adding new photos later (`-Incremental`)
+**Labels are preserved.** Rename a file to `20250804-007-Birthday.heic` and later runs
+leave it alone, so you can annotate favourites without breaking anything.
 
-Once a library is migrated, **never re-run the plain scan over it.** Sequence numbers
-are assigned by sorting within each day with the file path as tiebreaker. Migrated
-files have new paths, so a second plain run reshuffles the numbering and renames
-thousands of files for nothing.
+## Adding more photos later
 
-`-Incremental` treats any root file under a `YYYYMMDD-NNN` name as *settled*:
+Copy the new photos in, then run with `-Incremental`. Files already carrying a
+`YYYYMMDD-NNN` name in the library root are treated as *settled*:
 
-- **Never renamed, renumbered, or moved.** They appear in the plan as `Skip`.
-- **Each day's numbering resumes from its high-water mark.** A new photo from a day
-  that already ends at `-003` becomes `-004`, not a collision.
-- **Settled copies win duplicate contests.** Re-importing a photo you already have
-  quarantines the *new* copy and leaves the one already in place.
-
-The routine for every future import:
+- **Never renamed, renumbered or moved.** They show as `Skip` in the plan.
+- **Numbering continues.** A new photo from a day that already ends at `-003` becomes
+  `-004`.
+- **The copy you already have wins.** Re-importing a photo you already filed
+  quarantines the *new* copy, not the settled one.
 
 ```powershell
-# 1. Copy from the phone into a staging folder inside the library.
-#    Copy, don't move -- leave the originals on the phone until you have verified.
+# 1. Copy new photos into the library. Copy, don't move -- leave the
+#    originals on the phone until you have checked the result.
 
-# 2. Audit. Read-only; re-hashes the whole library to catch duplicates.
+# 2. Audit.
 .\Migrate-Photos.ps1 -Incremental
 
-# 3. Find same-photo-different-format pairs. Pass EVERY prior run's plan --
-#    each import adds a generation of settled files that needs resolving.
-.\Find-NearDuplicates.ps1 -PlanPath ".\reports\run-<new>\plan.csv" `
-    -HistoryPlanPath @(".\reports\run-<new>\plan.csv", ".\reports\run-<older>\plan.csv")
+# 3. Optional: find the same photo saved as both HEIC and JPEG.
+.\Find-NearDuplicates.ps1 -PlanPath ".\reports\run-<timestamp>\plan.csv"
 
-# 4. Check "Already migrated, untouched" matches your current root file count,
-#    then review plan.csv, duplicates.csv and possible-duplicates.csv.
+# 4. Check "Already migrated, untouched" matches your current file count,
+#    then read plan.csv and duplicates.csv.
 
 # 5. Apply.
-.\Migrate-Photos.ps1 -Execute -PlanPath ".\reports\run-<new>\plan.csv"
-
-# 6. Clear the emptied import folders yourself.
+.\Migrate-Photos.ps1 -Execute -PlanPath ".\reports\run-<timestamp>\plan.csv"
 ```
 
-Two things to know about repeating this:
+> **Always use `-Incremental` on a library you have already migrated.** Without it,
+> numbering is recalculated from scratch and thousands of already-sorted files get
+> renamed for no reason.
 
-- **Step 3's history list grows by one entry per import.** Miss one and the script
-  reports fewer pairs rather than failing, so check the "Recovered N camera filenames
-  from M history plan(s)" line it prints.
-- **Every run re-hashes the whole library**, so audits get slower as it grows:
-  roughly a minute per 12 GB. Only the audit is affected; applying a plan stays fast
-  because moves within a drive are instant.
+Every run re-hashes the whole library to catch duplicates, so audits get slower as it
+grows — roughly a minute per 12 GB. Only the audit is affected; applying a plan is
+fast, because moving files within a drive is instant.
 
-Keep every `reports\run-*` folder. They carry the undo manifests and the camera-name
-history, and both are needed later.
+Quarantined duplicates need no special handling on later runs: quarantine is skipped
+during scanning, but every file in it is byte-identical to one still in the library,
+so an incoming copy still matches.
 
-Duplicates against the quarantine folder need no special handling: quarantine is
-excluded from scanning, but every quarantined file is byte-identical to one that
-stayed in the root, so an incoming copy still matches.
+## Same photo, HEIC and JPEG
 
-## Same photo, different format (`Find-NearDuplicates.ps1`)
-
-Importing from an iPhone with "Automatic" conversion leaves you holding the HEIC
-original *and* a JPEG of the same shot. They share no bytes, so SHA-256 correctly
-refuses to call them duplicates and both are kept. This script finds them.
+Windows converts HEIC to JPEG on import unless you set *Keep Originals*. Import once
+each way — or on two PCs — and you hold both renditions of the same photo. They share
+no bytes, so SHA-256 correctly keeps both. This finds them:
 
 ```powershell
-.\Find-NearDuplicates.ps1 -PlanPath        ".\reports\run-B\plan.csv" `
-                          -HistoryPlanPath ".\reports\run-A\plan.csv" `
-                          -RenameMapPath   ".\reports\run-A\rename-map.csv"
+.\Find-NearDuplicates.ps1 -PlanPath ".\reports\run-<timestamp>\plan.csv"
 ```
 
 A pair is reported only when the camera filenames share a stem (`IMG_7533`), the
-capture instants match, both files are stills, and the formats differ. All four
-conditions are needed:
+capture instants match, both files are stills, and the formats differ. Every condition
+earns its place:
 
-- **Stem alone is unsafe** — phones recycle `IMG_####` numbers across years.
+- **Stem alone is unsafe** — iPhones recycle `IMG_####` numbers.
 - **Capture time alone is far too loose** — Windows exposes `Date taken` only to the
-  minute, so a burst of shots shares one timestamp. Matching on time alone produced
-  7,186 files in testing, almost all false; adding the stem cut it to 196.
+  minute, so a burst of shots shares one timestamp. On a real library, time alone
+  flagged 7,186 files and was almost entirely wrong; adding the stem cut it to 196.
 - **Stills only** — a HEIC and a MOV a second apart is a Live Photo, not a duplicate.
 
-Already-migrated files no longer carry their camera filename, so `-HistoryPlanPath`
-recovers it from the runs that renamed them. If they were renamed *again* after a
-plan was written, `-RenameMapPath` bridges the gap: current → old → camera name.
-Both parameters accept lists. Without the full chain the script silently finds
-nothing, so check the counts it prints when it starts.
+Apple's edited renditions (`IMG_E7533`) count as a separate photo from the original.
 
-Apple's edited renditions (`IMG_E7533`) are tracked as a separate stem from the
-original — an edit is a genuinely different image.
+Once a file is renamed, nothing on disk remembers it arrived as `IMG_7533.HEIC`, so
+`Migrate-Photos.ps1` records that in `reports\library-index.csv` as it goes. The
+script reads it automatically; there is nothing to pass or maintain.
 
-The script only reports. Which format to keep is a judgement call: HEIC is the
-original at about half the size, JPEG is larger, slightly lossy, and opens anywhere.
+**It only reports.** Which format to keep is your call: HEIC is the original at about
+half the size, JPEG is larger and slightly lossy but opens anywhere. Keeping both is
+perfectly reasonable — the overlap is usually a fraction of a percent of the library.
 
-## What to review after a scan
+## What the reports tell you
 
 `reports\run-<timestamp>\`
 
-| File | What it tells you |
+| File | Contents |
 |---|---|
 | `plan.csv` | Every planned action: source, destination, new name, capture date, date source |
-| `duplicates.csv` | Each quarantined copy paired with the twin kept in its place — original paths, post-migration names, size, shared hash. Sorted largest first |
-| `same-name-different-photo.csv` | Files sharing a name that cover genuinely different photos. Every distinct image is kept; byte-identical twins within the group are still quarantined |
-| `possible-duplicates.csv` | Written by `Find-NearDuplicates.ps1`. Same photo in two formats |
-| `ignored-files.csv` | Non-media files left untouched where they are |
+| `duplicates.csv` | Each quarantined copy paired with the twin kept in its place. Sorted largest first |
+| `same-name-different-photo.csv` | Files sharing a name that are genuinely different photos |
+| `possible-duplicates.csv` | From `Find-NearDuplicates.ps1`: the same photo in two formats |
+| `ignored-files.csv` | Non-media files, left where they are |
 | `manifest.csv` | Written by `-Execute`. Feeds `Undo-Migration.ps1` |
 
-Worth checking before executing:
+`reports\library-index.csv` sits alongside them and accumulates across runs.
 
-1. The **low-confidence date count** in the summary. If non-zero, filter `plan.csv`
-   for `DateSource = CreationTime` and spot-check those.
-2. A few rows in `duplicates.csv` — confirm the kept copy is the one you'd want.
-   Because matches are byte-identical, both files are the same image and the choice
-   only affects which folder it came from. To verify a pair with a tool other than
-   this script: `fc /b "<KeptPath>" "<DuplicatePath>"`, Windows' own byte comparator.
-3. The scale of `same-name-different-photo.csv`, to confirm nothing collapsed that
+Before executing, three things are worth a look:
+
+1. The **low-confidence date count** in the summary. If it is not zero, filter
+   `plan.csv` by `DateSource` and spot-check.
+2. A few rows of `duplicates.csv`. Matches are byte-identical, so both files are the
+   same image and the choice only affects which folder it came from. Verify a pair
+   independently with `fc /b "<KeptPath>" "<DuplicatePath>"`.
+3. The size of `same-name-different-photo.csv`, to confirm nothing collapsed that
    shouldn't have.
 
 ## Safety
 
-- **Two-pass by design.** The scan cannot modify anything; execution only replays a
-  CSV you have already read.
-- **Nothing is deleted, ever.** Duplicates are quarantined, not removed.
-- **Nothing is overwritten.** If a destination is occupied, the file gets a `_dup1`
-  suffix and a warning rather than clobbering.
-- **Fully reversible** via `Undo-Migration.ps1`, which restores original paths and
-  recreates the original folder tree. Verified as a byte-for-byte round-trip.
-- **Empty folders are reported, not deleted.** The script prints the cleanup command
-  so the decision stays yours.
-- **Plans carry their own root**, so applying one against the wrong `-Root` warns and
-  self-corrects instead of acting on the wrong library.
-- `-CopyInstead` duplicates rather than moves, leaving the original tree intact.
-  Needs a second copy's worth of disk.
+- **Two passes.** The scan cannot modify anything; execution only replays a CSV you
+  have read.
+- **Nothing is deleted, ever.** Duplicates are quarantined, not removed. Emptied
+  folders are reported, not deleted — the script prints the cleanup command and leaves
+  the decision to you.
+- **Nothing is overwritten.** An occupied destination gets a `_dup1` suffix and a
+  warning.
+- **Fully reversible.** `Undo-Migration.ps1` restores original paths and recreates the
+  original folder tree.
+- **Plans know their own library**, so applying one against the wrong `-Root` warns and
+  corrects itself rather than acting on the wrong folder.
+- `-CopyInstead` copies instead of moving, leaving the source tree untouched. Needs
+  room for a second copy.
+
+Keep the `reports\` folder. It holds the undo manifests and the camera-name index.
 
 ## Parameters
 
@@ -296,22 +275,21 @@ Worth checking before executing:
 
 | Parameter | Default | Purpose |
 |---|---|---|
-| `-Root` | `%USERPROFILE%\Pictures` | Library root. Files are gathered recursively and land back here |
+| `-Root` | `%USERPROFILE%\Pictures` | Library root. Scanned recursively; files land back here |
 | `-Execute` | off | Apply a plan. Requires `-PlanPath` |
 | `-PlanPath` | — | The reviewed `plan.csv` to apply |
 | `-Incremental` | off | Adding to an already-migrated library. Leaves settled files untouched |
 | `-CopyInstead` | off | Copy instead of move |
-| `-NoPairGrouping` | off | Don't keep Live Photo / sidecar sets on one number |
-| `-QuarantineName` | `_DuplicatesQuarantine` | Duplicate folder name, created under `-Root` |
-| `-ReportRoot` | `.\reports` | Where run artifacts go. Kept outside the library by default |
+| `-NoPairGrouping` | off | Number Live Photo / sidecar sets separately |
+| `-QuarantineName` | `_DuplicatesQuarantine` | Quarantine folder, created under `-Root` |
+| `-ReportRoot` | `.\reports` | Where run artifacts go. Outside the library by default |
 
 ### `Find-NearDuplicates.ps1`
 
 | Parameter | Purpose |
 |---|---|
 | `-PlanPath` | The plan to analyse (required) |
-| `-HistoryPlanPath` | Prior run plans, for recovering camera filenames. Accepts a list |
-| `-RenameMapPath` | Rename logs (`Old`,`New` CSV) if files were renamed after a plan was written. Accepts a list |
+| `-IndexPath` | Camera-name index. Found automatically beside the plan |
 | `-OutputPath` | Report destination. Defaults to the plan's folder |
 
 ### `Undo-Migration.ps1`
@@ -320,28 +298,33 @@ Worth checking before executing:
 |---|---|
 | `-ManifestPath` | The manifest to reverse (required). Supports `-WhatIf` |
 
+## Supported files
+
+Photos `.jpg .jpeg .png .heic .heif .gif .bmp .webp .tif .tiff`, raw
+`.dng .raw .cr2 .cr3 .nef .arw .orf .rw2`, video
+`.mov .mp4 .m4v .avi .mkv .3gp .mpg .mpeg .wmv`, sidecars `.aae .xmp .thm`.
+
+Anything else is listed in `ignored-files.csv` and left exactly where it is.
+
 ## Testing
 
 Verified end-to-end on sandboxes seeded with real photos plus deliberately planted
 exact duplicates and name-collisions-with-different-content:
 
-- Flatten/rename/quarantine produced exactly the planted duplicates, no others
+- Flatten, rename and quarantine produced exactly the planted duplicates and no others
 - Unique SHA-256 count identical before and after — no unique image lost
 - Undo restored every file to its original path and folder structure
-- Incremental mode left settled files untouched, continued day numbering correctly,
-  and made settled copies win duplicate contests
-- The folder-date parser is unit-tested against 15 real folder-name shapes,
-  including ones that must *not* parse
-
-Hashing throughput measured at ~219 MB/s.
+- Incremental mode left settled files untouched, continued numbering correctly, and
+  made settled copies win duplicate contests
+- The folder-date parser is unit-tested against folder names that must parse and
+  names that must not
 
 ## Notes
 
-- Requires Windows PowerShell 5.1+ (uses `Shell.Application` COM for metadata).
+- Windows only: reads photo metadata through `Shell.Application` COM.
 - If script execution is blocked:
   `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
-- Keep the `reports\` folder until you're satisfied — it's the only way to undo.
-- `reports\` is gitignored: it contains the full paths and filenames of your library.
+- `reports\` is gitignored. It contains the paths and filenames of your library.
 
 ## Licence
 

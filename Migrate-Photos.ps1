@@ -302,6 +302,42 @@ function New-UniqueDestination {
     return $candidate
 }
 
+<#
+  Maintains reports\library-index.csv: the camera filename each file arrived with,
+  keyed by the name it now carries in the library.
+
+  Once a file is renamed to 20250804-007.heic, nothing on disk remembers it used to
+  be IMG_7533.HEIC -- and Find-NearDuplicates.ps1 needs that to spot the same shot
+  saved as both HEIC and JPEG. Accumulating it here, one row per file, means later
+  runs never have to be handed a list of previous runs.
+#>
+function Update-LibraryIndex {
+    param(
+        [string] $RunDir,
+        [System.Collections.Generic.List[object]] $Additions
+    )
+
+    if ($Additions.Count -eq 0) { return }
+
+    # One directory above the per-run folder, so it survives across runs.
+    $indexPath = Join-Path (Split-Path -Parent $RunDir) 'library-index.csv'
+
+    $merged = [ordered]@{}
+    if (Test-Path -LiteralPath $indexPath) {
+        foreach ($row in (Import-Csv -LiteralPath $indexPath)) {
+            $merged[$row.Name] = $row
+        }
+    }
+    foreach ($row in $Additions) {
+        $merged[$row.Name] = $row
+    }
+
+    $merged.Values | Sort-Object Name |
+        Export-Csv -LiteralPath $indexPath -NoTypeInformation -Encoding UTF8
+
+    Write-Host "  Index     : $indexPath  ($($merged.Count) files)"
+}
+
 # --------------------------------------------------------------------------
 # PASS 2 -- apply a reviewed plan
 # --------------------------------------------------------------------------
@@ -339,6 +375,7 @@ function Invoke-Plan {
 
     $manifestPath = Join-Path (Split-Path -Parent $Plan) 'manifest.csv'
     $manifest = [System.Collections.Generic.List[object]]::new()
+    $indexAdds = [System.Collections.Generic.List[object]]::new()
 
     $done = 0
     $failed = 0
@@ -391,6 +428,14 @@ function Invoke-Plan {
                 OriginalPath    = $row.SourcePath
                 CurrentPath     = $finalDest
             })
+
+            if ($row.Action -eq 'Keep') {
+                $indexAdds.Add([PSCustomObject]@{
+                    Name        = Split-Path -Leaf $finalDest
+                    CameraName  = $row.OriginalName
+                    CaptureDate = $row.CaptureDate
+                })
+            }
         }
         catch {
             Write-Warning "Failed on $($row.SourcePath): $($_.Exception.Message)"
@@ -401,6 +446,7 @@ function Invoke-Plan {
     Write-Progress -Activity "$verb pass" -Completed
 
     $manifest | Export-Csv -LiteralPath $manifestPath -NoTypeInformation -Encoding UTF8
+    Update-LibraryIndex -RunDir (Split-Path -Parent $Plan) -Additions $indexAdds
 
     Write-Host ''
     Write-Host "  Completed : $($manifest.Count)" -ForegroundColor Green
