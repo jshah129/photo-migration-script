@@ -53,7 +53,7 @@ first and falls back only when it must:
 | 2 | `Media created` (shell property 214) | Videos. Accepted only if it agrees with the folder's month |
 | 3 | Date embedded in filename | e.g. `PXL_20240229_...`, `2024-02-29...` |
 | 4 | `LastWriteTime`, if it agrees with the folder's month | Has a real day-of-month, so preferred when plausible |
-| 5 | Date encoded in the folder name | Trailing `MMDD` (`Day 3 Roadtrip 0805` → Aug 5) gives an exact day; leading `YYYYMM` (`202206__` → June 2022) defaults the day to the 1st |
+| 5 | Month encoded in the folder name | Leading `YYYYMM` only (`202310_a` → Oct 2023). Day defaults to the 1st |
 | 6 | `LastWriteTime`, when no folder date exists | Rough, but usually the right era |
 | 7 | `CreationTime` | Last resort. Flagged as low-confidence |
 | — | `Unreliable` | Every source failed. Flagged for manual review |
@@ -84,13 +84,11 @@ library settled which sources deserve trust: of 3,761 files in month-encoded fol
 never disagreed once. So the folder cross-check is applied to `Media created` and
 deliberately withheld from EXIF.
 
-**Trip folders name their own day.** `Day 3 Roadtrip 0805` means Aug 5, so a rejected
-video timestamp still resolves to the right day rather than the 1st of the month. The
-trailing `MMDD` needs a year from elsewhere — the discarded metadata is wrong about
-the day but right about the year. Folders ending in a bare year (`Trip 2023`) are
-correctly ignored, because 20 is not a month. The search walks up to three parent
-levels, since curated subfolders (`Day 3 Roadtrip 0805\Selected Media`) name no date
-of their own, and stops at the library root.
+**Only a leading `YYYYMM` counts as a folder date.** Digits elsewhere in a folder name
+are ignored on purpose: `Project 1204` is not December 4th and `Invoice 0315` is not
+March 15th, and guessing otherwise misdates files silently. The search walks up to
+three parent levels, since curated subfolders (`202310_a\Selected Media`) name no date
+of their own, and stops at the library root so folders outside it are never consulted.
 
 ### Not everything odd is an artifact
 

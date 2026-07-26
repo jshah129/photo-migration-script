@@ -19,8 +19,8 @@
                                                    the month the folder claims
     3. Date embedded in the original filename   -- e.g. PXL_20240229_...
     4. LastWriteTime, when it agrees with the folder's month (it has a real day)
-    5. Date encoded in the folder name          -- leading YYYYMM or trailing MMDD
-    6. LastWriteTime, when no folder date exists
+    5. Month encoded in the folder name         -- leading YYYYMM, e.g. "202310_a"
+    6. LastWriteTime, when no folder month exists
     7. CreationTime (last resort; often a bulk-copy date and untrustworthy)
 
   Every source is floored at 1990-01-01, because some files carry a zeroed date
@@ -135,46 +135,25 @@ function ConvertFrom-ShellDate {
 }
 
 <#
-  Folders often encode their contents' date two ways, and both beat the
-  file timestamps, which were flattened to the bulk-copy date:
+  Phone exports commonly name folders by the month they cover -- "202206__",
+  "202310_a" -- and that beats a file timestamp flattened to a bulk-copy date.
 
-    "iPhone Pictures\202206__"          leading YYYYMM  -> June 2022, no day
-    "Day 3 Roadtrip 0805"             trailing MMDD   -> Aug 5, year unknown
+  Only a leading YYYYMM is accepted. Digits elsewhere in a folder name are not
+  treated as dates: "Project 1204" and "Invoice 0315" are not December 4th and
+  March 15th, and guessing otherwise misdates files silently.
 
-  The trailing form has no year, so YearHint supplies one. Returns an object with
-  the resolved Date and whether the day is real (HasDay) or defaulted to the 1st.
+  Returns the first of the encoded month, or $null.
 #>
-function Get-FolderDateHint {
-    param(
-        [string] $FolderName,
-        [Nullable[int]] $YearHint
-    )
+function Get-FolderMonthHint {
+    param([string] $FolderName)
 
-    $maxYear = (Get-Date).Year + 1
+    $m = [regex]::Match($FolderName, '^(?<y>19\d{2}|20\d{2})(?<m>0[1-9]|1[0-2])(?:[^\d]|$)')
+    if (-not $m.Success) { return $null }
 
-    $lead = [regex]::Match($FolderName, '^(?<y>19\d{2}|20\d{2})(?<m>0[1-9]|1[0-2])(?:[^\d]|$)')
-    if ($lead.Success) {
-        $y = [int] $lead.Groups['y'].Value
-        $mo = [int] $lead.Groups['m'].Value
-        if ($y -ge 1990 -and $y -le $maxYear) {
-            return [PSCustomObject]@{ Date = [datetime]::new($y, $mo, 1); HasDay = $false }
-        }
-    }
+    $y = [int] $m.Groups['y'].Value
+    if ($y -lt 1990 -or $y -gt (Get-Date).Year + 1) { return $null }
 
-    # Trailing MMDD, e.g. "Day 10 Roadtrip 0812". Requires a year from elsewhere.
-    # Folders ending in a bare year ("Trip 2023") are rejected: 20 is not a month.
-    if ($null -ne $YearHint -and $YearHint -ge 1990 -and $YearHint -le $maxYear) {
-        $trail = [regex]::Match($FolderName, '(?:^|\D)(?<m>0[1-9]|1[0-2])(?<d>0[1-9]|[12]\d|3[01])$')
-        if ($trail.Success) {
-            $mo = [int] $trail.Groups['m'].Value
-            $d = [int] $trail.Groups['d'].Value
-            if ($d -le [datetime]::DaysInMonth($YearHint, $mo)) {
-                return [PSCustomObject]@{ Date = [datetime]::new($YearHint, $mo, $d); HasDay = $true }
-            }
-        }
-    }
-
-    return $null
+    return [datetime]::new($y, [int] $m.Groups['m'].Value, 1)
 }
 
 function Get-DateFromFilename {
@@ -219,38 +198,32 @@ function Resolve-CaptureDate {
     if ($null -ne $taken -and $taken -lt $MinPlausibleDate) { $taken = $null }
     if ($null -ne $created -and $created -lt $MinPlausibleDate) { $created = $null }
 
-    # EXIF "Date taken" is trusted outright. Across every photo in this library it
-    # never once disagreed with the month its folder claimed.
+    # EXIF "Date taken" is trusted outright. Measured across a full library it never
+    # once disagreed with the month its folder claimed.
     if ($null -ne $taken) {
         return [PSCustomObject]@{ Date = $taken; Source = 'ExifDateTaken' }
     }
 
     $writeOk = $File.LastWriteTime -ge $MinPlausibleDate
 
-    # Folders naming only a day ("Day 3 Roadtrip 0805") need a year from elsewhere.
-    # Both candidates are wrong about the day but right about the year.
-    $yearHint = $null
-    if ($null -ne $created) { $yearHint = $created.Year }
-    elseif ($writeOk) { $yearHint = $File.LastWriteTime.Year }
-
-    # Curated subfolders carry no date of their own -- "Day 3 Roadtrip 0805\Selected
-    # Media" is dated by its parent, not its leaf. Walk up until a folder names a date,
+    # Curated subfolders carry no date of their own -- "202310_a\Selected Media" is
+    # dated by its parent, not its leaf. Walk up until a folder names a month,
     # stopping at the library root so folders outside it are never consulted.
     $folder = $null
     $probe = $File.Directory
     for ($hop = 0; $hop -lt 3 -and $null -ne $probe; $hop++) {
         if ($probe.FullName.TrimEnd('\') -eq $Root.TrimEnd('\')) { break }
-        $folder = Get-FolderDateHint -FolderName $probe.Name -YearHint $yearHint
+        $folder = Get-FolderMonthHint -FolderName $probe.Name
         if ($null -ne $folder) { break }
         $probe = $probe.Parent
     }
 
-    # "Media created" is not trustworthy on its own: 200 videos here share a single
-    # 2023-10-15 00:16 stamp, which is when they were exported rather than shot.
-    # Accept it only when it agrees with the month the folder claims.
+    # "Media created" is not trustworthy on its own: re-encoded videos share a single
+    # stamp recording when they were exported rather than shot. Accept it only when it
+    # agrees with the month the folder claims.
     if ($null -ne $created) {
         if ($null -eq $folder -or
-            ($created.Year -eq $folder.Date.Year -and $created.Month -eq $folder.Date.Month)) {
+            ($created.Year -eq $folder.Year -and $created.Month -eq $folder.Month)) {
             return [PSCustomObject]@{ Date = $created; Source = 'MediaCreated' }
         }
     }
@@ -262,15 +235,14 @@ function Resolve-CaptureDate {
 
     # A timestamp inside the folder's month is probably genuine and carries a real
     # day-of-month, so prefer it. Outside, it is a bulk-copy artifact and the folder
-    # wins -- exactly to the day if the folder names one, otherwise to the 1st.
+    # wins -- though the folder knows only the month, so the day defaults to the 1st.
     if ($null -ne $folder) {
         if ($writeOk -and
-            $File.LastWriteTime.Year -eq $folder.Date.Year -and
-            $File.LastWriteTime.Month -eq $folder.Date.Month) {
+            $File.LastWriteTime.Year -eq $folder.Year -and
+            $File.LastWriteTime.Month -eq $folder.Month) {
             return [PSCustomObject]@{ Date = $File.LastWriteTime; Source = 'LastWriteTime' }
         }
-        $src = if ($folder.HasDay) { 'FolderDay' } else { 'FolderMonth' }
-        return [PSCustomObject]@{ Date = $folder.Date; Source = $src }
+        return [PSCustomObject]@{ Date = $folder; Source = 'FolderMonth' }
     }
 
     if ($writeOk) {
@@ -301,10 +273,9 @@ function Get-KeeperRank {
         'ExifDateTaken' { 0 }
         'MediaCreated'  { 0 }
         'Filename'      { 1 }
-        'FolderDay'     { 2 }
-        'LastWriteTime' { 3 }
-        'FolderMonth'   { 4 }
-        default         { 5 }
+        'LastWriteTime' { 2 }
+        'FolderMonth'   { 3 }
+        default         { 4 }
     }
     return "{0}|{1}|{2:d3}|{3}" -f $settledRank, $sourceRank, $Entry.Depth, $Entry.FullName.ToLowerInvariant()
 }
