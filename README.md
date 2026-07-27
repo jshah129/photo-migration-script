@@ -77,32 +77,9 @@ File timestamps are the *last* thing to trust, so real capture metadata is read 
 Every row in `plan.csv` records which source won, in its `DateSource` column. Sort by
 it and spot-check anything below priority 3 before you execute.
 
-Three details worth knowing, because each one silently misdates files if handled
-naively:
-
-**Zeroed metadata reads as 1969.** Some videos carry an empty `Media created` that
-parses to the Unix epoch. Left alone they all pile up under `19691231-NNN`. Every
-source is floored at 1990; below that the value is discarded and the next one tried.
-
-**Video timestamps lie more than photo timestamps.** Re-encoded or exported videos
-often share one `Media created` value recording when they were exported, not shot.
-Where a folder names its month, `Media created` is checked against it and rejected if
-it disagrees. EXIF `Date taken` gets no such treatment — measured across a full
-library, it never disagreed with a folder once, while `Media created` accounted for
-every disagreement found.
-
-**Only a leading `YYYYMM` counts as a folder date.** Digits elsewhere in a folder name
-are ignored on purpose: `Project 1204` is not December 4th. The search walks up to
-three parent levels, since a subfolder like `Selected` carries no date of its own, and
-stops at the library root.
-
-> EXIF times are camera-local; Google's `PXL_` filenames are UTC. A photo taken at 7pm
-> on 2/28 local becomes `PXL_20240229_...`. EXIF wins, which is correct — the file is
-> named for the day you actually took it.
-
-A day where every photo shares one timestamp usually means a bulk-copy artifact, but
-not always: if the times span the whole day and neighbouring days are present, it is a
-real day and is left alone.
+Implausible dates are rejected rather than used — a video carrying an empty timestamp
+that reads as 1969 falls through to the next source instead of landing under
+`19691231-NNN`.
 
 ## How duplicates are handled
 
@@ -200,31 +177,32 @@ so an incoming copy still matches.
 
 Windows converts HEIC to JPEG on import unless you set *Keep Originals*. Import once
 each way — or on two PCs — and you hold both renditions of the same photo. They share
-no bytes, so SHA-256 correctly keeps both. This finds them:
+no bytes, so they are not duplicates in any technical sense.
+
+**Both are kept, and that is the right default.** HEIC is the original at about half
+the size; JPEG opens anywhere without conversion. Neither can be regenerated from the
+other, and the overlap is typically a fraction of a percent of the library — not worth
+the risk of throwing one away.
+
+If you want to see them anyway:
 
 ```powershell
 .\Find-NearDuplicates.ps1 -PlanPath ".\reports\run-<timestamp>\plan.csv"
 ```
 
-A pair is reported only when the camera filenames share a stem (`IMG_7533`), the
-capture instants match, both files are stills, and the formats differ. Every condition
-earns its place:
+This writes `possible-duplicates.csv` listing each pair with both filenames, formats
+and sizes. It only reports — there is no option to act on it. If you decide you want
+only one format, move those files to the quarantine folder yourself using the
+filenames in the CSV.
 
-- **Stem alone is unsafe** — iPhones recycle `IMG_####` numbers.
-- **Capture time alone is far too loose** — Windows exposes `Date taken` only to the
-  minute, so a burst of shots shares one timestamp. On a real library, time alone
-  flagged 7,186 files and was almost entirely wrong; adding the stem cut it to 196.
-- **Stills only** — a HEIC and a MOV a second apart is a Live Photo, not a duplicate.
-
-Apple's edited renditions (`IMG_E7533`) count as a separate photo from the original.
+Pairs are matched on the camera filename stem plus the capture instant together;
+either alone is unreliable, since iPhones recycle `IMG_####` numbers and Windows
+exposes `Date taken` only to the minute. Live Photo video halves are excluded, and
+Apple's edited renditions (`IMG_E7533`) count as separate photos.
 
 Once a file is renamed, nothing on disk remembers it arrived as `IMG_7533.HEIC`, so
 `Migrate-Photos.ps1` records that in `reports\library-index.csv` as it goes. The
 script reads it automatically; there is nothing to pass or maintain.
-
-**It only reports.** Which format to keep is your call: HEIC is the original at about
-half the size, JPEG is larger and slightly lossy but opens anywhere. Keeping both is
-perfectly reasonable — the overlap is usually a fraction of a percent of the library.
 
 ## What the reports tell you
 

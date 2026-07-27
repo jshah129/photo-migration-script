@@ -632,8 +632,8 @@ Write-Host "  Byte-identical duplicates : $($dupReport.Count)  ($([math]::Round(
 # duplicates.csv is written after the plan is built, so it can also record the
 # name each duplicate ends up under in quarantine and where its kept twin lands.
 
-# The case the user specifically worried about: same filename, different photo.
-# These are NOT duplicates and all copies are kept.
+# Same filename, different photo -- the case name-based dedup gets catastrophically
+# wrong. These are NOT duplicates and every distinct image is kept.
 $nameCollisions = [System.Collections.Generic.List[object]]::new()
 foreach ($group in ($entries | Where-Object { -not $_.IsSidecar } | Group-Object Name | Where-Object { $_.Count -gt 1 })) {
     $distinct = @($group.Group | Select-Object -ExpandProperty Hash -Unique)
@@ -717,8 +717,8 @@ foreach ($s in $settled) {
 
 foreach ($set in $sets) {
     # Year-first so plain filename sort is chronological, and the sequence is padded
-    # to three digits so within a day -2 does not sort after -10. The busiest day in
-    # this library holds 316 files.
+    # to three digits so within a day -002 does not sort after -010. A heavy day can
+    # easily hold a few hundred files.
     $day = $set.Date.ToString('yyyyMMdd')
     if (-not $counters.ContainsKey($day)) { $counters[$day] = 0 }
     $counters[$day]++
