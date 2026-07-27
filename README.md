@@ -304,6 +304,17 @@ exact duplicates and name-collisions-with-different-content:
   `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
 - `reports\` is gitignored. It contains the paths and filenames of your library.
 
+## A note on how this was built
+
+This project — the scripts as well as this README — was written with the assistance
+of AI, working against a real photo library rather than a synthetic one. Most of the
+behaviour documented above exists because a scan of that library turned up something
+the first attempt got wrong.
+
+It has been tested end to end, but it moves your files. Run the read-only scan first,
+read `plan.csv`, and keep the `reports\` folder until you are satisfied — that is the
+only route back.
+
 ## Licence
 
 MIT
